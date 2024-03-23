@@ -12,7 +12,8 @@ type Driver interface {
 }
 
 var (
-	ErrLockNotFound = errors.New("lock not found")
+	ErrLockNotFound  = errors.New("lock not found")
+	ErrAlreadyLocked = errors.New("already locked")
 )
 
 const (

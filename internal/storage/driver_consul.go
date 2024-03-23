@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
-	"runtime"
 	"strings"
+	"time"
 
 	"github.com/axxapy/fleetlock-consul/internal"
 
@@ -14,8 +13,10 @@ import (
 )
 
 type driverConsul struct {
-	client *consul.Client
 	logger *slog.Logger
+
+	consulKV      *consul.KV
+	consulSession *consul.Session
 }
 
 func NewDriverConsul(config internal.ConsulConfig) (Driver, error) {
@@ -38,21 +39,20 @@ func NewDriverConsul(config internal.ConsulConfig) (Driver, error) {
 	}
 
 	return &driverConsul{
-		client: client,
-		logger: slog.Default().With("go_file", func() string {
-			_, file, _, _ := runtime.Caller(1)
-			return filepath.Base(file)
-		}()),
+		consulKV:      client.KV(),
+		consulSession: client.Session(),
+		logger:        slog.Default().With("__source", "driver_consul"),
 	}, nil
 }
 
-func (d *driverConsul) Lock(ctx context.Context, group, id string) error {
+func (d *driverConsul) withLock(ctx context.Context, group, id string, f func() error) error {
+	keyName := key(group + "::lock")
 	consulArgs := new(consul.WriteOptions).WithContext(ctx)
-	keyName := key(group)
 
-	sessionID, _, err := d.client.Session().Create(&consul.SessionEntry{
+	sessionID, _, err := d.consulSession.Create(&consul.SessionEntry{
 		Name:     keyName,
 		Behavior: "delete",
+		TTL:      "15s",
 	}, consulArgs)
 	if err != nil {
 		d.logger.Error("failed to create session", "error", err)
@@ -60,43 +60,86 @@ func (d *driverConsul) Lock(ctx context.Context, group, id string) error {
 	}
 
 	kv := &consul.KVPair{Key: keyName, Value: []byte(id), Session: sessionID}
-	ok, _, err := d.client.KV().Acquire(kv, consulArgs)
+	var repeatCounter int
+again:
+	ok, _, err := d.consulKV.Acquire(kv, consulArgs)
 	if err != nil {
 		d.logger.Error("failed to acquire lock", "group", group, "id", id, "error", err)
 	}
 	if !ok {
-		return fmt.Errorf("failed to acquire lock for group %s with id %s", group, id)
+		/* https://developer.hashicorp.com/consul/docs/dynamic-app-config/sessions
+		 * The final nuance is that sessions may provide a lock-delay . This is a time duration, between 0 and 60 seconds.
+		 * When a session invalidation takes place, Consul prevents any of the previously held locks from being re-acquired
+		 *   for the lock-delay interval; this is a safeguard inspired by Google's Chubby. */
+		repeatCounter++
+		if repeatCounter > 60 {
+			return fmt.Errorf("failed to acquire lock for group %s with id %s", group, id)
+		}
+		time.Sleep(time.Second)
+		goto again
 	}
-	return err
+
+	defer func() {
+		_, err := d.consulSession.Destroy(sessionID, new(consul.WriteOptions).WithContext(ctx))
+		//ok, _, err := d.consulKV.Release(kv, new(consul.WriteOptions).WithContext(ctx))
+		if err != nil {
+			d.logger.Error("failed to release lock", "group", group, "session_id", sessionID, "error", err)
+		}
+		if !ok {
+			d.logger.Error("failed to unlock group", "group", group, "session_id", sessionID, "error", err)
+		}
+	}()
+
+	return f()
+}
+
+func (d *driverConsul) Lock(ctx context.Context, group, id string) error {
+	return d.withLock(ctx, group, id, func() error {
+		keyName := key(group)
+
+		pair, _, err := d.consulKV.Get(keyName, new(consul.QueryOptions).WithContext(ctx))
+		if err != nil {
+			d.logger.Error("failed to get group record", "group", group, "id", id, "error", err)
+			return err
+		}
+
+		if pair != nil && string(pair.Value) != id {
+			return fmt.Errorf("%w: group %s already locked by %s", ErrAlreadyLocked, group, string(pair.Value))
+		}
+
+		kv := &consul.KVPair{Key: keyName, Value: []byte(id)}
+		if _, err := d.consulKV.Put(kv, new(consul.WriteOptions).WithContext(ctx)); err != nil {
+			d.logger.Error("failed to put key", "key", keyName, "error", err)
+			return err
+		}
+
+		return nil
+	})
 }
 
 func (d *driverConsul) Unlock(ctx context.Context, group, id string) error {
-	keyName := key(group)
+	return d.withLock(ctx, group, id, func() error {
+		keyName := key(group)
 
-	pair, _, err := d.client.KV().Get(keyName, new(consul.QueryOptions).WithContext(ctx))
-	if err != nil {
-		d.logger.Error("failed to find session that locked", "group", group, "id", id, "error", err)
-		return err
-	}
+		pair, _, err := d.consulKV.Get(keyName, new(consul.QueryOptions).WithContext(ctx))
+		if err != nil {
+			d.logger.Error("failed to get group record", "group", group, "id", id, "error", err)
+			return err
+		}
 
-	if pair == nil || pair.Session == "" {
-		return fmt.Errorf("%w: failed to find session that locked for group %s with id %s", ErrLockNotFound, group, id)
-	}
+		if pair == nil {
+			return nil
+		}
 
-	sessionID := pair.Session
+		if string(pair.Value) != id {
+			return fmt.Errorf("client with %s can not unlock group %s that was locked by %s", id, group, string(pair.Value))
+		}
 
-	kv := &consul.KVPair{Key: keyName, Value: []byte(id), Session: sessionID}
-	ok, _, err := d.client.KV().Release(kv, new(consul.WriteOptions).WithContext(ctx))
-	if err != nil {
-		d.logger.Error("failed to release lock", "group", group, "id", id, "error", err)
-	}
-	if !ok {
-		return fmt.Errorf("failed to release lock for group %s with id %s", group, id)
-	}
+		if _, err := d.consulKV.Delete(keyName, new(consul.WriteOptions).WithContext(ctx)); err != nil {
+			d.logger.Error("failed to delete key", "key", keyName, "error", err)
+			return err
+		}
 
-	if _, err := d.client.KV().Delete(keyName, new(consul.WriteOptions).WithContext(ctx)); err != nil {
-		d.logger.Error("failed to delete key", "key", keyName, "error", err)
-	}
-
-	return err
+		return nil
+	})
 }

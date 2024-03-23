@@ -14,7 +14,10 @@ import (
 )
 
 func main() {
-	logger := slog.Default()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: true,
+	}))
+	slog.SetDefault(logger)
 
 	check := func(desc string, err error) {
 		if err != nil {

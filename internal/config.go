@@ -2,15 +2,13 @@ package internal
 
 import (
 	"fmt"
-	"time"
-
 	"github.com/hashicorp/go-sockaddr/template"
 	"github.com/kelseyhightower/envconfig"
 )
 
 type (
 	Config struct {
-		LockTimeout  time.Duration    `yaml:"lock_timeout" envconfig:"lock_timeout" default:"15s"`
+		//LockTimeout  time.Duration    `yaml:"lock_timeout" envconfig:"lock_timeout" default:"15s"`
 		DefaultGroup string           `yaml:"default_group" envconfig:"default_group" default:"default"`
 		Consul       ConsulConfig     `yaml:"consul" envconfig:"consul"`
 		Http         HttpServerConfig `yaml:"http" envconfig:"http"`

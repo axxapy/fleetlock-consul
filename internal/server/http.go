@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/axxapy/fleetlock-consul/internal"
@@ -39,10 +37,7 @@ func StartHttpServer(ctx context.Context, httpConfig internal.HttpServerConfig, 
 	server := &httpServer{
 		defaultGroup:  defaultGroup,
 		storageDriver: storageDriver,
-		logger: slog.Default().With("go_file", func() string {
-			_, file, _, _ := runtime.Caller(1)
-			return filepath.Base(file)
-		}()),
+		logger:        slog.Default().With("__source", "http_server"),
 	}
 
 	mux := http.NewServeMux()
