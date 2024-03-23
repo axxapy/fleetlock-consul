@@ -17,7 +17,7 @@ var (
 )
 
 const (
-	keyTemplate = "com.coreos.zincati/%s"
+	keyTemplate = "com.coreos.fleetlock/%s"
 )
 
 func key(group string) string {
