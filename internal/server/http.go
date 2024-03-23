@@ -115,7 +115,7 @@ func (s *httpServer) HandleFleetLock(w http.ResponseWriter, r *http.Request) {
 
 	err := s.storageDriver.Lock(r.Context(), req.ClientParams.Group, req.ClientParams.Id)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(errorBody{
 			Kind:  "failed_lock",
 			Value: err.Error(),
@@ -137,7 +137,7 @@ func (s *httpServer) HandleFleetUnlock(w http.ResponseWriter, r *http.Request) {
 
 	err := s.storageDriver.Unlock(r.Context(), req.ClientParams.Group, req.ClientParams.Id)
 	if err != nil && !errors.Is(err, storage.ErrLockNotFound) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(errorBody{
 			Kind:  "failed_unlock",
 			Value: err.Error(),
