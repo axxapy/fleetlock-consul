@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
-
-	"github.com/axxapy/fleetlock-consul/internal"
 
 	consul "github.com/hashicorp/consul/api"
+
+	"github.com/axxapy/fleetlock-consul/internal"
 )
 
 type driverConsul struct {
@@ -60,8 +59,7 @@ func (d *driverConsul) withLock(ctx context.Context, group, id string, f func() 
 	}
 
 	kv := &consul.KVPair{Key: keyName, Value: []byte(id), Session: sessionID}
-	var repeatCounter int
-again:
+
 	ok, _, err := d.consulKV.Acquire(kv, consulArgs)
 	if err != nil {
 		d.logger.Error("failed to acquire lock", "group", group, "id", id, "error", err)
@@ -71,22 +69,16 @@ again:
 		 * The final nuance is that sessions may provide a lock-delay . This is a time duration, between 0 and 60 seconds.
 		 * When a session invalidation takes place, Consul prevents any of the previously held locks from being re-acquired
 		 *   for the lock-delay interval; this is a safeguard inspired by Google's Chubby. */
-		repeatCounter++
-		if repeatCounter > 60 {
-			return fmt.Errorf("failed to acquire lock for group %s with id %s", group, id)
-		}
-		time.Sleep(time.Second)
-		goto again
+		return fmt.Errorf("failed to acquire lock for group %s with id %s", group, id)
 	}
 
 	defer func() {
-		_, err := d.consulSession.Destroy(sessionID, new(consul.WriteOptions).WithContext(ctx))
 		//ok, _, err := d.consulKV.Release(kv, new(consul.WriteOptions).WithContext(ctx))
-		if err != nil {
+		if _, err := d.consulKV.Delete(keyName, new(consul.WriteOptions).WithContext(ctx)); err != nil {
 			d.logger.Error("failed to release lock", "group", group, "session_id", sessionID, "error", err)
 		}
-		if !ok {
-			d.logger.Error("failed to unlock group", "group", group, "session_id", sessionID, "error", err)
+		if _, err := d.consulSession.Destroy(sessionID, new(consul.WriteOptions).WithContext(ctx)); err != nil {
+			d.logger.Error("failed to destroy lock session", "group", group, "session_id", sessionID, "error", err)
 		}
 	}()
 
