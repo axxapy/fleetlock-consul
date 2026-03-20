@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/axxapy/fleetlock-consul/internal"
 	"github.com/axxapy/fleetlock-consul/internal/mocks"
 	"github.com/axxapy/fleetlock-consul/internal/storage"
 	"go.uber.org/mock/gomock"
@@ -36,6 +38,65 @@ func fleetlockRequest(body string) *http.Request {
 	req.Header.Set("fleet-lock-protocol", "true")
 	return req
 }
+
+// --- StartHttpServer tests ---
+
+func TestStartHttpServer_Success(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	driver := mocks.NewMockDriver(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	servers, err := StartHttpServer(ctx, internal.HttpServerConfig{Listen: "127.0.0.1:0"}, "default", driver)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(servers))
+	}
+
+	cancel()
+	for _, s := range servers {
+		s.Close()
+	}
+}
+
+func TestStartHttpServer_InvalidAddr(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	driver := mocks.NewMockDriver(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err := StartHttpServer(ctx, internal.HttpServerConfig{Listen: "127.0.0.1:-1"}, "default", driver)
+	if err == nil {
+		t.Fatal("expected error for invalid address")
+	}
+}
+
+func TestStartHttpServer_MultipleListeners(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	driver := mocks.NewMockDriver(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	servers, err := StartHttpServer(ctx, internal.HttpServerConfig{Listen: "127.0.0.1:0, 127.0.0.1:0"}, "default", driver)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(servers))
+	}
+
+	cancel()
+	for _, s := range servers {
+		s.Close()
+	}
+}
+
+// --- HandleFleetLock tests ---
 
 func TestHandleFleetLock_Success(t *testing.T) {
 	srv, driver := newTestServer(t)
@@ -85,6 +146,31 @@ func TestHandleFleetLock_TransientErrorThenSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleFleetLock_TimeoutAfterRetries(t *testing.T) {
+	srv, driver := newTestServer(t)
+
+	// Always return transient error so retries exhaust the timeout
+	driver.EXPECT().Lock(gomock.Any(), "default", "node-1").Return(fmt.Errorf("consul unavailable")).AnyTimes()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled - ctx.Done() fires immediately on first retry
+
+	w := httptest.NewRecorder()
+	req := fleetlockRequest(`{"client_params":{"id":"node-1"}}`)
+	req = req.WithContext(ctx)
+	srv.HandleFleetLock(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 after timeout, got %d", w.Code)
+	}
+
+	var body errorBody
+	json.NewDecoder(w.Body).Decode(&body)
+	if body.Kind != "failed_lock" {
+		t.Fatalf("expected kind 'failed_lock', got %q", body.Kind)
+	}
+}
+
 func TestHandleFleetLock_MissingHeader(t *testing.T) {
 	srv, _ := newTestServer(t)
 
@@ -108,6 +194,25 @@ func TestHandleFleetLock_MissingID(t *testing.T) {
 	}
 }
 
+func TestHandleFleetLock_InvalidJSON(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.HandleFleetLock(w, fleetlockRequest(`not json`))
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	var body errorBody
+	json.NewDecoder(w.Body).Decode(&body)
+	if body.Kind != "invalid_body" {
+		t.Fatalf("expected kind 'invalid_body', got %q", body.Kind)
+	}
+}
+
+// --- HandleFleetUnlock tests ---
+
 func TestHandleFleetUnlock_ReturnsOKImmediately(t *testing.T) {
 	srv, _ := newTestServer(t)
 
@@ -116,5 +221,17 @@ func TestHandleFleetUnlock_ReturnsOKImmediately(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHandleFleetUnlock_MissingHeader(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{"client_params":{"id":"node-1"}}`))
+	srv.HandleFleetUnlock(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
