@@ -11,11 +11,25 @@ import (
 	"github.com/axxapy/fleetlock-consul/internal"
 )
 
+//go:generate mockgen -destination=../mocks/mock_consul.go -package=mocks github.com/axxapy/fleetlock-consul/internal/storage ConsulKVClient,ConsulSessionClient
+
+type ConsulKVClient interface {
+	Get(key string, q *consul.QueryOptions) (*consul.KVPair, *consul.QueryMeta, error)
+	Put(p *consul.KVPair, q *consul.WriteOptions) (*consul.WriteMeta, error)
+	Delete(key string, w *consul.WriteOptions) (*consul.WriteMeta, error)
+	Acquire(p *consul.KVPair, q *consul.WriteOptions) (bool, *consul.WriteMeta, error)
+}
+
+type ConsulSessionClient interface {
+	Create(se *consul.SessionEntry, q *consul.WriteOptions) (string, *consul.WriteMeta, error)
+	Destroy(id string, q *consul.WriteOptions) (*consul.WriteMeta, error)
+}
+
 type driverConsul struct {
 	logger *slog.Logger
 
-	consulKV      *consul.KV
-	consulSession *consul.Session
+	consulKV      ConsulKVClient
+	consulSession ConsulSessionClient
 }
 
 func NewDriverConsul(config internal.ConsulConfig) (Driver, error) {

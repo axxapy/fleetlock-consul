@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/axxapy/fleetlock-consul/internal"
 	"github.com/axxapy/fleetlock-consul/internal/storage"
@@ -15,9 +16,10 @@ import (
 
 type (
 	httpServer struct {
-		defaultGroup  string
-		storageDriver storage.Driver
-		logger        *slog.Logger
+		defaultGroup   string
+		storageDriver  storage.Driver
+		unlockCleaner  *unlockCleaner
+		logger         *slog.Logger
 	}
 
 	requestBody struct {
@@ -34,9 +36,13 @@ type (
 )
 
 func StartHttpServer(ctx context.Context, httpConfig internal.HttpServerConfig, defaultGroup string, storageDriver storage.Driver) error {
+	cleaner := newUnlockCleaner(storageDriver)
+	go cleaner.Run(ctx)
+
 	server := &httpServer{
 		defaultGroup:  defaultGroup,
 		storageDriver: storageDriver,
+		unlockCleaner: cleaner,
 		logger:        slog.Default().With("__source", "http_server"),
 	}
 
@@ -113,20 +119,50 @@ func (s *httpServer) HandleFleetLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.storageDriver.Lock(r.Context(), req.ClientParams.Group, req.ClientParams.Id)
-	if err != nil {
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(errorBody{
-			Kind:  "failed_lock",
-			Value: err.Error(),
-		})
+	const (
+		lockTimeout    = 30 * time.Second
+		initialBackoff = 200 * time.Millisecond
+		maxBackoff     = 5 * time.Second
+	)
 
-		s.logger.Error("failed to lock", "error", err)
+	ctx, cancel := context.WithTimeout(r.Context(), lockTimeout)
+	defer cancel()
 
-		return
+	backoff := initialBackoff
+	for {
+		err := s.storageDriver.Lock(ctx, req.ClientParams.Group, req.ClientParams.Id)
+		if err == nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Data lock held by another node - legitimate rejection, don't retry
+		if errors.Is(err, storage.ErrAlreadyLocked) {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(errorBody{
+				Kind:  "failed_lock",
+				Value: err.Error(),
+			})
+			s.logger.Error("failed to lock", "error", err)
+			return
+		}
+
+		// Transient error (mutex contention, consul unavailable) - retry
+		s.logger.Warn("lock failed, retrying", "group", req.ClientParams.Group, "id", req.ClientParams.Id, "error", err, "backoff", backoff)
+
+		select {
+		case <-ctx.Done():
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(errorBody{
+				Kind:  "failed_lock",
+				Value: err.Error(),
+			})
+			s.logger.Error("failed to lock after retries", "error", err)
+			return
+		case <-time.After(backoff):
+			backoff = min(backoff*2, maxBackoff)
+		}
 	}
-
-	w.WriteHeader(http.StatusOK)
 }
 
 func (s *httpServer) HandleFleetUnlock(w http.ResponseWriter, r *http.Request) {
@@ -135,18 +171,6 @@ func (s *httpServer) HandleFleetUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.storageDriver.Unlock(r.Context(), req.ClientParams.Group, req.ClientParams.Id)
-	if err != nil && !errors.Is(err, storage.ErrLockNotFound) {
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(errorBody{
-			Kind:  "failed_unlock",
-			Value: err.Error(),
-		})
-
-		s.logger.Error("failed to unlock", "error", err)
-
-		return
-	}
-
+	s.unlockCleaner.Send(req.ClientParams.Group, req.ClientParams.Id)
 	w.WriteHeader(http.StatusOK)
 }

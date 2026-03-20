@@ -6,6 +6,8 @@ import (
 	"fmt"
 )
 
+//go:generate mockgen -destination=../mocks/mock_driver.go -package=mocks github.com/axxapy/fleetlock-consul/internal/storage Driver
+
 type Driver interface {
 	Lock(ctx context.Context, group, id string) error
 	Unlock(ctx context.Context, group, id string) error
