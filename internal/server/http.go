@@ -35,11 +35,11 @@ type (
 	}
 )
 
-func StartHttpServer(ctx context.Context, httpConfig internal.HttpServerConfig, defaultGroup string, storageDriver storage.Driver) error {
+func StartHttpServer(ctx context.Context, httpConfig internal.HttpServerConfig, defaultGroup string, storageDriver storage.Driver) ([]*http.Server, error) {
 	cleaner := newUnlockCleaner(storageDriver)
 	go cleaner.Run(ctx)
 
-	server := &httpServer{
+	srv := &httpServer{
 		defaultGroup:  defaultGroup,
 		storageDriver: storageDriver,
 		unlockCleaner: cleaner,
@@ -47,25 +47,40 @@ func StartHttpServer(ctx context.Context, httpConfig internal.HttpServerConfig, 
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/pre-reboot", server.HandleFleetLock)
-	mux.HandleFunc("/v1/steady-state", server.HandleFleetUnlock)
+	mux.HandleFunc("/v1/pre-reboot", srv.HandleFleetLock)
+	mux.HandleFunc("/v1/steady-state", srv.HandleFleetUnlock)
 
-	errChan := make(chan error)
+	var servers []*http.Server
+	errChan := make(chan error, 1)
 
 	for _, listen := range strings.Split(httpConfig.Listen, ",") {
-		listen := strings.TrimSpace(listen)
+		listen = strings.TrimSpace(listen)
+		hs := &http.Server{
+			Addr:    listen,
+			Handler: mux,
+			BaseContext: func(listener net.Listener) context.Context {
+				return ctx
+			},
+		}
+		servers = append(servers, hs)
 		go func() {
-			errChan <- (&http.Server{
-				Addr:    listen,
-				Handler: mux,
-				BaseContext: func(listener net.Listener) context.Context {
-					return ctx
-				},
-			}).ListenAndServe()
+			if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				select {
+				case errChan <- err:
+				default:
+				}
+			}
 		}()
 	}
 
-	return <-errChan
+	// Give listeners a moment to fail (e.g. port already in use)
+	select {
+	case err := <-errChan:
+		return nil, err
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	return servers, nil
 }
 
 func (s *httpServer) unmarshalRequest(w http.ResponseWriter, r *http.Request) (*requestBody, bool) {

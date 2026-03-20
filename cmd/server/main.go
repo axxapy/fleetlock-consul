@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,28 +33,34 @@ func main() {
 	storageDriver, err := storage.NewDriverConsul(c.Consul)
 	check("failed to create storage driver", err)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	servers, err := server.StartHttpServer(ctx, c.Http, c.DefaultGroup, storageDriver)
+	check("failed to start http server", err)
+
+	logger.Info("server started", "listen", c.Http.Listen)
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	go func() {
-		err := server.StartHttpServer(ctx, c.Http, c.DefaultGroup, storageDriver)
-		check("failed to start http server", err)
-
-		logger.Info("http server started", "listen", c.Http.Listen)
-
-		<-ctx.Done()
-	}()
-
-	logger.Info("server started")
-
 	s := <-sig
 
-	logger.Info("got signal, shutting down (5 seconds)", "signal", s)
+	logger.Info("got signal, shutting down", "signal", s)
 
 	cancel()
-	<-time.After(5 * time.Second)
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	for _, hs := range servers {
+		shutdown(hs, shutdownCtx)
+	}
 
 	logger.Info("shutdown complete")
+}
+
+func shutdown(hs *http.Server, ctx context.Context) {
+	if err := hs.Shutdown(ctx); err != nil {
+		slog.Error("http server shutdown error", "addr", hs.Addr, "error", err)
+	}
 }
