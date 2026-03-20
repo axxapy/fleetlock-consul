@@ -1,17 +1,13 @@
-# build environment
 FROM golang:1.26-alpine AS build-env
 
 ADD . /src
-RUN cd /src && go build -o fleetlock-consul cmd/server/main.go
+RUN cd /src && CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o fleetlock-consul ./cmd/server
 
-# run environment
-FROM alpine
+FROM scratch
 
-# https://support.circleci.com/hc/en-us/articles/360016505753-Resolve-Certificate-Signed-By-Unknown-Authority-error-in-Alpine-images
-RUN apk --no-cache add ca-certificates
-
+COPY --from=build-env /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build-env /src/fleetlock-consul /usr/local/bin/fleetlock-consul
 
-USER nobody
+USER 65534
 
-CMD [ "/usr/local/bin/fleetlock-consul" ]
+ENTRYPOINT ["/usr/local/bin/fleetlock-consul"]
