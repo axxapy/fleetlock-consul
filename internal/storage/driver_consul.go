@@ -76,14 +76,14 @@ func (d *driverConsul) withLock(ctx context.Context, group, id string, f func() 
 
 	ok, _, err := d.consulKV.Acquire(kv, consulArgs)
 	if err != nil {
-		d.logger.Error("failed to acquire lock", "group", group, "id", id, "error", err)
+		return fmt.Errorf("failed to acquire lock for group %s: %w", group, err)
 	}
 	if !ok {
-		/* https://developer.hashicorp.com/consul/docs/dynamic-app-config/sessions
-		 * The final nuance is that sessions may provide a lock-delay . This is a time duration, between 0 and 60 seconds.
-		 * When a session invalidation takes place, Consul prevents any of the previously held locks from being re-acquired
-		 *   for the lock-delay interval; this is a safeguard inspired by Google's Chubby. */
-		return fmt.Errorf("failed to acquire lock for group %s with id %s", group, id)
+		// https://developer.hashicorp.com/consul/docs/dynamic-app-config/sessions
+		// Sessions may provide a lock-delay (0-60s). When a session invalidation takes place,
+		// Consul prevents any of the previously held locks from being re-acquired for the
+		// lock-delay interval; this is a safeguard inspired by Google's Chubby.
+		return fmt.Errorf("failed to acquire lock for group %s with id %s: lock contention", group, id)
 	}
 
 	defer func() {

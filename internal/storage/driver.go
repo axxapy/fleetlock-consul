@@ -13,10 +13,7 @@ type Driver interface {
 	Unlock(ctx context.Context, group, id string) error
 }
 
-var (
-	ErrLockNotFound  = errors.New("lock not found")
-	ErrAlreadyLocked = errors.New("already locked")
-)
+var ErrAlreadyLocked = errors.New("already locked")
 
 const (
 	keyTemplate = "com.coreos.fleetlock/%s"
