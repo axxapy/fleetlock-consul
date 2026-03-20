@@ -3,7 +3,7 @@ command=$1
 
 case $command in
     "consul")
-        onsul agent -dev
+        consul agent -dev
         ;;
     
     "lock")
