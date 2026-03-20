@@ -1,7 +1,8 @@
 FROM golang:1.26-alpine AS build-env
 
 ADD . /src
-RUN cd /src && CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o fleetlock-consul ./cmd/server
+ARG VERSION=dev
+RUN cd /src && CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=$VERSION" -trimpath -o fleetlock-consul ./cmd/server
 
 FROM scratch
 
