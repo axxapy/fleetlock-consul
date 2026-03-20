@@ -1,4 +1,4 @@
-.PHONY: help bootstrap fmt lint test coverage run build docker clean
+.PHONY: help bootstrap fmt lint test coverage e2e run build docker clean
 .DEFAULT_GOAL := help
 
 help:
@@ -15,6 +15,10 @@ test: generate ## Run tests
 
 coverage: generate ## Run tests with coverage
 	go test -cover ./...
+
+e2e: ## Run E2E tests (docker compose)
+	docker compose -f build/docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from e2e; \
+	ret=$$?; docker compose -f build/docker-compose.e2e.yml down; exit $$ret
 
 run: ## Run the server
 	go run ./cmd/server
