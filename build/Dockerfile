@@ -1,5 +1,5 @@
 # build environment
-FROM golang:1.22-alpine AS build-env
+FROM golang:1.26-alpine AS build-env
 
 ADD . /src
 RUN cd /src && go build -o fleetlock-consul cmd/server/main.go
